@@ -1,0 +1,709 @@
+---
+title: "Final Project"
+author: "bhushan"
+date: "05/02/2022"
+output:
+  prettydoc::html_pretty:
+    theme: architect
+    highlight: github
+    
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, warning = F)
+```
+
+# Introductions
+
+Data set consists of weekly sales data, provided by one of the largest retail company - Walmart. The data set provided consist of historical sales data for 45 Walmart stores located in different regions. The data set captured information for the period between 2010-02-05 to 2012-11-01 directly sourced from Kaggle. Information includes Date of Sale (Friday considered for the Week), Store, Department, and whether the week is a special holiday week.
+
+### Task
+
+We have taken the task to predict total sales for one store, one depart ent based on the historical time-series data available for it.
+
+### Views
+
+Given the fact that this is a retail data, we generally expect that there would be seasonality in the data because of various external factors and customer behaviour. We will try to identify patterns in the data, getting to know it well and assuring the quality of the dataset before fixating on a particular Store, Department for time-series regression.
+
+Importing useful Libraries for EDA
+
+```{r results='hide'}
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(prettydoc)
+```
+
+# Explorations on the Dataset
+
+```{r echo=T}
+getwd()
+setwd('/Users/bhushanpuneet/Desktop/Academic Folders/Spring/Forecasting & Time Series/Project Walmart Stores/')
+df=read.csv("Walmart_Sales.csv")
+```
+
+Dataset dimensions:
+
+```{r}
+dim(df)
+```
+
+Glimpse at the Dataset:
+
+```{r}
+head(df)
+```
+
+
+```{r}
+str(df)
+```
+
+```{r}
+df$Date <- as.Date(df$Date)
+```
+
+
+```{r}
+summary(df)
+```
+
+We can see some negative values.
+
+```{r}
+dim(df[df$Weekly_Sales<0,])
+```
+
+Not too many compared to 421k rows. So, instead of truncating to zero, I will remove.
+
+```{r}
+df <- df[df$Weekly_Sales>0,]
+```
+
+We also do not have any NA values, and now this seems like a good, clean dataset.
+
+```{r}
+ggplot(df, aes(x = Store, y = Weekly_Sales))+ 
+  geom_jitter(aes(colour = factor(IsHoliday))) + 
+  xlab('Store') +
+  ggtitle("Store Sales") +
+  theme_minimal()
+```
+
+Outlying Weekly Sales belongs to the weeks of Holidays. Also, few Stores have most of the Weekly Sales, they must be big stores.
+
+```{r}
+ggplot(df, aes(x=Dept, y=Weekly_Sales)) + 
+  geom_jitter(aes(colour = factor(IsHoliday))) + 
+  xlab('Dept') +
+  ggtitle("Department Sales") +
+  theme_minimal()
+```
+
+It is clearly visible that there is one department which shows very high weekly sales during Holiday Week. This could be Electronics, which sees the maximum explosion in sale during holidays
+
+```{r}
+boxplot(df$Weekly_Sales ~ df$IsHoliday, df, main='Comparing the Weekly Sales on Holidays vs Normal Days', 
+        xlab = 'Is Holiday?', ylab='Weekly Sales', frame = FALSE, border = "steelblue")
+```
+
+While there is not much difference in the mean Weekly Sales but we can see that outlying values belong to Holiday days
+
+
+```{r}
+dum_df <- df %>% group_by(Store) %>% summarise(Avg_Store_Sales=mean(Weekly_Sales), Tot_Sales=sum(Weekly_Sales)) 
+dum_df <- dum_df %>% arrange(desc(Avg_Store_Sales))
+
+ggplot(data=dum_df, aes(x=reorder(factor(Store), -Avg_Store_Sales), y=Avg_Store_Sales)) +
+  geom_bar(stat="identity", fill="steelblue") +
+  xlab('Store') +
+  theme_minimal()
+```
+
+We can see that top Selling Stores are 20,4,14,13,2,10,27,6 in the said period
+
+
+```{r}
+dum_df <- dum_df %>% arrange(desc(Tot_Sales))
+ggplot(data=dum_df, aes(x=reorder(factor(Store), -Tot_Sales), y=Tot_Sales)) +
+  geom_bar(stat="identity", fill="steelblue") +
+  xlab('Store') +
+  theme_minimal()
+```
+
+For Univariate Analysis, I will just be working with the Store that has the maximum Total Sale in the given period i.e. Store 20 
+
+```{r}
+Store_20 <- df %>% filter(Store==20) %>% group_by(Store, Dept) %>% 
+  summarise(Avg_Store_Sales=mean(Weekly_Sales),
+            Tot_Sales=sum(Weekly_Sales))
+head(Store_20)
+```
+
+Let us try to visualize distribution of various Categories in our selected Store (20)
+
+```{r}
+ggplot(data=Store_20, aes(x=reorder(factor(Dept), -Tot_Sales), y=Tot_Sales)) +
+  geom_bar(stat="identity", fill="steelblue") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=7))
+```
+
+Onwards, I will just be working with the Category-92 of Store-20
+
+```{r}
+Store_df <- df %>%  filter(Store==20, Dept==92) %>% dplyr::select('Date','Weekly_Sales') 
+head(Store_df)
+```
+
+
+```{r}
+summary(Store_df)
+```
+
+
+```{r}
+ggplot(Store_df, aes(x=Date, y=Weekly_Sales)) +
+  geom_line(color="steelblue") + 
+  geom_smooth(method=lm) +
+  xlab("") +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=60, hjust=1)) 
+```
+
+We can see the Seasonality in this time-series, both yearly and monthly
+
+Let us try to fix linear model on this, which we guess is gonna be a fail
+
+```{r}
+Model1 = lm(Store_df$Weekly_Sales~Store_df$Date)
+summary(Model1)
+```
+
+# Time Series Regression (ARIMA Modeling)
+
+Importing Libraries
+
+```{r}
+library(forecast)
+library(tseries)
+library(patchwork)
+```
+
+As for the data generating process is concerned, it would be imperative to check visible correlations between lag values and original ones. So, before we go on, let us try to visualize the correlations
+
+```{r}
+par(mfrow=c(2,2))
+
+plot(Store_df$Weekly_Sales,type='l')
+
+plot(lag(Store_df$Weekly_Sales),Store_df$Weekly_Sales,pch=20,
+     xlab="Z_{t-1}",ylab="Z_t")
+plot(lag(Store_df$Weekly_Sales,2),Store_df$Weekly_Sales,pch=20,
+     xlab="Z_{t-2}",ylab="Z_t")
+plot(lag(Store_df$Weekly_Sales,3),Store_df$Weekly_Sales,pch=20,
+     xlab="Z_{t-3}",ylab="Z_t")
+
+```
+
+Looking at the lag-plots, it seems that there is visible correlation of present values with 1st lag and 3rd lag. So, we might be looking at a AR3 process. We will continue our analysis.
+
+It seems from the series plotted against time while EDA that this time-series does not have a constant variance nor looks like having mean stationarity. Let us check the Stationarity of the Series, just to confirm
+
+```{r}
+adf.test(Store_df$Weekly_Sales)
+```
+
+It suggests Non-Stationary series as expected
+
+### Variance Stationarity
+Let us try to transform the series to make the Variance Stationary
+
+#### Let us try both a log transformation and Box Cox transformation together
+
+```{r}
+p1 <- ggplot(Store_df, aes(x=Date, y=log1p(Weekly_Sales))) +
+  geom_line(color="steelblue") + 
+  xlab("") +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=60, hjust=1)) 
+```
+
+
+```{r}
+Store_df_box = Store_df %>%
+  mutate(Sale_boxcox = forecast::BoxCox(Store_df$Weekly_Sales, lambda = 'auto'))
+# lambda=1.999927
+
+p2 <- ggplot(Store_df_box, aes(x=Date, y=Sale_boxcox)) +
+  geom_line(color="steelblue") + 
+  xlab("") +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=60, hjust=1)) 
+```
+
+
+```{r}
+p1 / p2
+```
+
+Both transformation are very much similar and satisfactory, I will take the log-transform (p1), because of parsimony
+
+### Mean Stationarity
+Let us work towards Mean Stationarity through differencing
+
+```{r}
+# 1st order differencing...
+Store_log_1diff <- Store_df %>%
+  mutate(Sale_log_1diff = log1p(Weekly_Sales)-lag(log1p(Weekly_Sales))  ) 
+
+head(Store_log_1diff)
+```
+
+
+```{r}
+p1_1diff <- ggplot(Store_log_1diff, aes(x=Date, y=Sale_log_1diff)) +
+  geom_line(color="steelblue") + 
+  xlab("") +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=60, hjust=1)) 
+```
+
+Visualizing the Original Time-Series with the Transformed one
+
+```{r}
+p1 / p1_1diff
+```
+
+Transformed time series looks pretty neat in stationarity. Let us check stationarity again
+
+```{r}
+
+
+Store_log_1diff <- Store_log_1diff %>% filter(Date>'2010-02-05')
+adf.test(Store_log_1diff$Sale_log_1diff)
+
+
+```
+For the above test, p-value is very low, so we have an almost stationary transformed time-series
+
+Let us now analyze the time series through acf/pacf plots:
+
+```{r}
+par(mfrow=c(2,1))
+acf(Store_log_1diff$Sale_log_1diff,lag.max=20)
+pacf(Store_log_1diff$Sale_log_1diff, lag.max = 20)
+
+```
+
+It looks to me as an AR(4) process as there is a bit dampening in the ACF plot.
+
+Let us strengthen on this further through AIC, BIC
+
+```{r}
+AIC(
+  arima(Store_log_1diff$Sale_log_1diff,order=c(4,0,0)),
+  arima(Store_log_1diff$Sale_log_1diff,order=c(4,0,1)),
+  arima(Store_log_1diff$Sale_log_1diff,order=c(4,0,2)),
+  arima(Store_log_1diff$Sale_log_1diff,order=c(4,0,3)),
+  arima(Store_log_1diff$Sale_log_1diff,order=c(3,0,0)),
+  arima(Store_log_1diff$Sale_log_1diff,order=c(3,0,1)),
+  arima(Store_log_1diff$Sale_log_1diff,order=c(3,0,2)),
+  arima(Store_log_1diff$Sale_log_1diff,order=c(3,0,3))
+)
+
+```
+
+AIC suggests ARIMA(4,0,3) or ARIMA(3,0,2)
+
+```{r}
+BIC(
+arima(Store_log_1diff$Sale_log_1diff,order=c(4,0,0)),
+arima(Store_log_1diff$Sale_log_1diff,order=c(4,0,1)),
+arima(Store_log_1diff$Sale_log_1diff,order=c(4,0,2)),
+arima(Store_log_1diff$Sale_log_1diff,order=c(4,0,3)),
+arima(Store_log_1diff$Sale_log_1diff,order=c(3,0,0)),
+arima(Store_log_1diff$Sale_log_1diff,order=c(3,0,1)),
+arima(Store_log_1diff$Sale_log_1diff,order=c(3,0,2)),
+arima(Store_log_1diff$Sale_log_1diff,order=c(3,0,3))
+)
+
+```
+
+BIC suggests the process is either ARIMA(4,0,0) or ARIMA(3,0,2)
+
+So, we have three contenders right now. Let us now refer auto.arima as well
+
+```{r}
+model1 <- auto.arima(Store_log_1diff$Sale_log_1diff,stationary=FALSE,allowdrift=FALSE,
+           seasonal=FALSE,stepwise=FALSE,approximation=FALSE)
+checkresiduals(model1)
+
+```
+
+It says ARIMA(3,0,2) after log-transformation and first order differencing. Before we conclude let us also refer to our original contender ARIMA(4,0,0). 
+
+```{r}
+model2 <- arima(Store_log_1diff$Sale_log_1diff,order=c(4,0,0))
+checkresiduals(model2)
+```
+
+Looking at the Residual diagnostics (Ljung-Box test), we can see that model1 shows more promising suggestions that there are almost no autocorrelation characteristics present in the residuals. The residual also seems to be normal. Residual seems to be reflecting white noise characters.
+
+So, we will select ARIMA(3,0,2), after first order differencing, against all other contenders.
+
+```{r}
+best_mod <- model1
+
+resid = best_mod$residuals
+pred = Store_log_1diff$Sale_log_1diff - resid
+ggplot()+
+  geom_line(aes(Store_log_1diff$Date,Store_log_1diff$Sale_log_1diff))+
+  geom_line(aes(Store_log_1diff$Date,pred),color='steelblue',alpha=0.4)+
+  theme_bw()+
+  xlab("Date")+
+  ylab("Log Weekly Sales")
+
+```
+
+Predicted Values are fairly aligned with the actual values, even in the yearly outlying peaks.
+
+Let us also refer the in-sample Root Mean Square Error for the selected model
+
+```{r}
+RMSE = sqrt(mean((expm1(pred) - expm1(Store_log_1diff$Sale_log_1diff))^2,na.rm=T))
+RMSE
+```
+
+
+## Forecasting
+
+We will now be forecasting this model for further 5 time periods i.e. 5 weeks. 
+
+```{r}
+best_mod %>%
+  forecast(h=5) %>% 
+  autoplot()
+```
+
+The forecast pattern follows the same monthly seasonality that we observed in the training data. But as you can see that in previous years as we are approaching almost at the end of the year, we see a gradual widening of the pattern, while in the forecast it is declining. It might not have taken a good care for seasonality. So, we should think about decomposing the times-series and do the modelling individually for each component. 
+
+```{r, echo=FALSE}
+# 
+# # optional
+# auto.arima(Store_log_1diff$Sale_log_1diff) %>%
+#   forecast(h=24) %>% 
+#   autoplot()
+```
+
+# Time Series Regression (Facebook Prophet Model)
+
+Installing Prophet: 
+
+```{r, echo=0, warning=FALSE, results='hide'}
+library(prophet)
+```
+
+Changing the names of the dataset:
+
+```{r}
+prophet_data = Store_df %>%
+  rename(ds = Date, # Have to name our date variable "ds"
+         y = Weekly_Sales)   # Have to name our time series "y"
+```
+
+Splitting the Dataset in Training and Testing (an Approximate Split of 70:30): 
+
+```{r}
+
+train = prophet_data %>% 
+  filter(ds<ymd("2012-01-31"))
+test = prophet_data %>%
+  filter(ds>=ymd("2012-01-31"))
+
+dim(train)
+
+dim(test)
+```
+
+Building model with Prophet:
+
+```{r}
+
+model = prophet(train, weekly.seasonality=FALSE, daily.seasonality = FALSE, 
+                yearly.seasonality=TRUE)
+
+```
+
+Forecasting and Plotting to see the fit that came out with Prophet: 
+
+```{r}
+
+future = make_future_dataframe(model,periods = 269)
+forecast = predict(model,future)
+
+plot(model,forecast) +
+  ylab("Weekly Sales for Department 92 of Store 20") + xlab("Date") + theme_bw()
+
+```
+
+Building a Dyplot to analyse the fit more closely:
+
+```{r}
+dyplot.prophet(model,forecast)
+```
+
+Decomposing the Time Series to look at the Trend and Seasonality, individually:
+
+```{r}
+
+prophet_plot_components(model,forecast)
+
+```
+
+We see an overall increasing trend in the time series, although very lean. 
+
+Also, weekly trend is un-interpretable as we only have Fridays, which would be when the weekly data was taken.
+
+Looking at the Yearly Trend, we can strengthen on our earlier interpretation that sale generally thrives at the end/start of the year
+
+Let's try to identify any changepoints, if they are detected by the model:
+
+```{r}
+
+plot(model,forecast)+
+  add_changepoints_to_plot(model)+
+  theme_bw()+
+  xlab("Date")+
+  ylab("Weekly Sales")
+
+```
+
+Only one change-point is observed. Sometimes it may happen that seasonality is misdetected as a changepoint. This does not seem like to cause any issues though.
+
+Let us look at the the forecast in comparison with the test dataset that we kept aside:
+
+```{r}
+
+forecast_plot_data = forecast %>% 
+  as_tibble() %>% 
+  mutate(ds = as.Date(ds)) %>% 
+  filter(ds>=ymd("2012-01-31"))
+forecast_not_scaled = ggplot()+
+  geom_line(aes(test$ds,test$y))+
+  geom_line(aes(forecast_plot_data$ds,forecast_plot_data$yhat),color='blue')
+forecast_not_scaled
+
+```
+
+So, looking at the the comparison, we can see that trend is being followed by the forecast and there is a bit of seasonal effect, not so profound, but it is there. Let us try to visualize the seasonal effects through scaling as well.
+
+```{r}
+
+forecast_scaled = forecast_not_scaled + 
+  ylim(0,400000)
+forecast_scaled
+
+```
+
+So, we can see properly now that seasonal effect is there in forecasted series as well as in the actual one.
+
+Let us see if we need to incorporate limits to the forecast, although we would not be forecasting more than our testing period, but let's see what we get:
+
+
+```{r}
+
+two_yr_future = make_future_dataframe(model,periods = 730)
+two_yr_forecast = predict(model,two_yr_future)
+plot(model,two_yr_forecast)+theme_bw()+xlab("Date")+ylab("Weekly Sales")
+
+```
+
+We do not need to put ceiling or flooring as we only see moderate increase in the trend, even when forecasting for 2 years.
+
+Investigating Additive vs Multiplicative seasonality:
+
+```{r}
+
+# by default the model considers additive nature
+
+additive = prophet(train, yearly.seasonality=TRUE)
+add_fcst = predict(additive,future)
+plot(additive,add_fcst)
+
+prophet_plot_components(additive,add_fcst)
+
+```
+
+
+```{r}
+
+
+multi = prophet(train, yearly.seasonality=TRUE, seasonality.mode = 'multiplicative')
+multi_fcst = predict(multi,future)
+plot(multi,multi_fcst)
+
+prophet_plot_components(multi, multi_fcst)
+
+```
+
+Now, as we are not working with Daily Sales data, so holiday assessment is not necessary.
+
+Let's try to judge the performance of the model quantitatively:
+
+```{r warning=FALSE}
+
+forecast_metric_data = forecast %>% 
+  as_tibble() %>% 
+  mutate(ds = as.Date(ds)) %>% 
+  filter(ds>=ymd("2012-01-31"))
+RMSE = sqrt(mean((test$y - forecast_metric_data$yhat)^2))
+MAE = mean(abs(test$y - forecast_metric_data$yhat))
+MAPE = mean(abs((test$y - forecast_metric_data$yhat)/test$y))
+
+```
+
+
+```{r}
+
+print(paste("RMSE:",round(RMSE,2)))
+
+```
+
+
+```{r}
+
+print(paste("MAE:",round(MAE,2)))
+
+```
+
+
+```{r}
+
+print(paste("MAPE:",round(MAPE,2)))
+
+```
+
+We can see that the Mean Absolute Percentage Error is ~8% which seems satisfactory but we have to look at the business context while making a judgment like this. For eg. 8% error for sale orders of ~200k would be around $16,000, which could be massive for some business.
+
+Now, we will try to use Cross Validation for building forecasting model:
+
+```{r}
+
+df.cv <- cross_validation(model, initial = 400, horizon=10, period=10, units = 'days')
+
+df.cv %>% 
+  ggplot()+
+  geom_line(aes(ds,y)) +
+  geom_point(aes(ds,yhat,color=factor(cutoff)))+
+  theme_bw()+
+  xlab("Date")+
+  ylab("Weekly Sales")+
+  scale_color_discrete(name = 'Cutoff')
+
+
+plot_cross_validation_metric(df.cv, metric = 'mape')
+
+```
+
+There isn't any seeming change in variance in the time series, so we do not observe multiplicative seasonality, but let's do comparison of Additive and Multiplicative seasonality:
+
+```{r}
+
+mod1 = prophet(train, yearly.seasonality = TRUE, seasonality.mode='additive')
+
+forecast1 = predict(mod1)
+
+df_cv1 <- cross_validation(mod1, initial = 400, horizon=10, period=10, units = 'days')
+
+metrics1 = performance_metrics(df_cv1) %>% 
+  mutate(model = 'mod1')
+
+```
+
+
+```{r}
+
+mod2 = prophet(train, yearly.seasonality = TRUE, seasonality.mode='multiplicative')
+
+
+forecast2 = predict(mod2)
+df_cv2 <- cross_validation(mod2, initial = 400, horizon = 10, period=10, units = 'days')
+
+metrics2 = performance_metrics(df_cv2) %>% 
+  mutate(model = "mod2")
+
+```
+
+Let us try to visualize both:
+
+```{r}
+
+metrics1 %>% 
+  bind_rows(metrics2) %>% 
+  ggplot()+
+  geom_line(aes(horizon,rmse,color=model))
+
+```
+
+We tried to build model individually assuming both additive and multiplicative seasonality, and it seems that the RMSE is very identical in both cases. So, we can just go ahead and assume the default seasonality of additive nature. 
+
+# Model Comparison between best models of ARIMA and Prophet
+
+ARIMA Model for RMSE comparison:
+
+```{r}
+
+best_mod_ar <- auto.arima(train$y,stationary=FALSE,allowdrift=FALSE,
+                 seasonal=FALSE,stepwise=FALSE,approximation=FALSE)
+checkresiduals(best_mod_ar)
+
+```
+
+ARIMA(3,1,2) on training dataset as well, checks out. 
+
+Calculating Out of Sample RMSE for ARIMA:
+
+```{r}
+
+test_pred = predict(best_mod_ar, 39)
+test_pred_ar = test_pred$pred
+error_ar = test$y - test_pred_ar
+
+out_rmse_ar=sqrt(mean(error_ar^2,na.rm=T))
+
+```
+
+Prophet Model for RMSE comparison:
+
+```{r}
+
+best_mod_pr = prophet(train, weekly.seasonality=FALSE, daily.seasonality = FALSE, 
+                yearly.seasonality=TRUE)
+
+future = make_future_dataframe(model,periods = 273)
+forecast = predict(best_mod_pr,future)
+
+forecast_metric_data = forecast %>% 
+  as_tibble() %>% 
+  mutate(ds = as.Date(ds)) %>% 
+  filter(ds>=ymd("2012-01-31"))
+
+out_rmse_pr = sqrt(mean((test$y - forecast_metric_data$yhat)^2))
+
+```
+Out of Sample RMSE comparison between best models built on ARIMA and Prophet:
+
+```{r}
+tibble(
+  `best_ARIMA` = round(out_rmse_ar,2),
+  `best_Prophet` = round(out_rmse_pr,2)
+)
+
+
+```
+
+While the RMSE is not that different from each other between both best models, but we still have a clear winner as the model built by Prophet, which reduces the RMSE by ~2.2% when compared with best model from ARIMA.
+
+We can say that while it is better to understand the Time Series through ARIMA through manually decomposing the time-series, and understanding the AR characteristics of the process, it is also advisable to use Prophet to compare the performance of the forecasting. Usually, the Prophet is better performing but to understand the data generating process, it would not hurt to build ARIMA for better understanding of the time-series.
+
+
